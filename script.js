@@ -83,6 +83,31 @@ recalc.addEventListener("click", () => {
 renderVersions();
 render();
 
+// Copy email, for visitors without a mail app. Falls back where the
+// clipboard API is unavailable.
+const copyEmail = $("copy-email");
+let copyTimer;
+copyEmail.addEventListener("click", async () => {
+  const email = copyEmail.dataset.email;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(email);
+    copied = true;
+  } catch {
+    const field = document.createElement("textarea");
+    field.value = email;
+    field.style.position = "fixed";
+    field.style.opacity = "0";
+    document.body.appendChild(field);
+    field.select();
+    copied = document.execCommand("copy");
+    field.remove();
+  }
+  copyEmail.textContent = copied ? "Copied" : "Couldn't copy";
+  clearTimeout(copyTimer);
+  copyTimer = setTimeout(() => { copyEmail.textContent = "Copy email"; }, 2000);
+});
+
 // Woven graphics: plain weave, navy warp over lime weft.
 const NS = "http://www.w3.org/2000/svg";
 const NAVY = "#1B3855";
@@ -176,23 +201,113 @@ function loomBand() {
   }
 }
 
-// Small swatch in the features list.
-function swatches() {
-  document.querySelectorAll("[data-weave]").forEach((host) => {
-    const W = host.clientWidth;
-    const H = host.clientHeight;
-    const size = 16;
-    const svg = svgFor(host, W, H);
-    for (let c = 0; c < Math.ceil(W / size); c++) {
-      for (let r = 0; r < Math.ceil(H / size); r++) drawCrossing(svg, c, r, c * size, r * size, size);
-    }
+// Design generation sample: same repeat and weight logic as the design sheets.
+const INK = { Navy: NAVY, Ivory: "#F6F5EF", Lime: LIME };
+const DESIGN = {
+  width: 58,
+  constant: 1.45,
+  warp: { set: 96, hanks: 0.00756, bands: [["Navy", 40], ["Ivory", 12], ["Lime", 6], ["Ivory", 12]] },
+  weft: { set: 72, hanks: 0.01134, bands: [["Navy", 32], ["Ivory", 10], ["Lime", 6], ["Ivory", 10]] },
+};
+const orderLength = $("order-length");
+const canvas = $("check");
+const qty = (n) => n.toLocaleString("en-IN", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+
+// How the order fills the width: full repeats, then a partial one.
+function breakup(side) {
+  const target = DESIGN.width * side.set;
+  const sum = side.bands.reduce((a, [, t]) => a + t, 0);
+  const counts = new Map();
+  if (!sum) return { target, sum, repeat: 0, left: 0, counts };
+  const repeat = Math.floor(target / sum);
+  const left = target - repeat * sum;
+  let remaining = left;
+  side.bands.forEach(([name, t]) => {
+    const take = Math.min(t, remaining);
+    remaining -= take;
+    counts.set(name, (counts.get(name) || 0) + t * repeat + take);
   });
+  return { target, sum, repeat, left, counts };
 }
+
+function renderSide(key) {
+  const side = DESIGN[key];
+  const { target, sum, repeat, left, counts } = breakup(side);
+  const metres = Math.max(0, Number(orderLength.value) || 0);
+  const perMetre = Number(((DESIGN.width * side.set * DESIGN.constant) / 840 * side.hanks).toFixed(3));
+  $(`${key}-total`).textContent = target.toLocaleString("en-IN");
+  if (!sum) {
+    $(`${key}-repeat`).textContent = "Enter at least one thread count.";
+    $(`${key}-breakup`).innerHTML = "";
+    return 0;
+  }
+  const times = `${repeat.toLocaleString("en-IN")} full ${repeat === 1 ? "repeat" : "repeats"} of ${sum} threads`;
+  $(`${key}-repeat`).textContent = left ? `${times}, then ${left} more to finish the width.` : `${times}, ending exactly at the selvedge.`;
+  const rows = [...counts]
+    .map(([name, n]) => {
+      const kg = perMetre * (n / target);
+      return `<tr><th scope="row"><span class="swatch-cell"><i style="background:${INK[name]}"></i>${name}</span></th><td class="n">${n.toLocaleString("en-IN")}</td><td class="n">${kg.toFixed(3)}</td><td class="n">${qty(kg * metres)}</td></tr>`;
+    })
+    .join("");
+  $(`${key}-breakup`).innerHTML = `${rows}<tr class="sum"><th scope="row">Total</th><td class="n">${target.toLocaleString("en-IN")}</td><td class="n">${perMetre.toFixed(3)}</td><td class="n">${qty(perMetre * metres)}</td></tr>`;
+  return perMetre * metres;
+}
+
+function drawCheck() {
+  const expand = (bands) => bands.flatMap(([name, t]) => Array(Math.min(t, 400)).fill(INK[name]));
+  const warp = expand(DESIGN.warp.bands);
+  const weft = expand(DESIGN.weft.bands);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  if (!warp.length || !weft.length) return;
+  const thread = 2 * dpr;
+  const cols = Math.ceil(canvas.width / thread);
+  const rows = Math.ceil(canvas.height / thread);
+  for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows; r++) {
+      ctx.fillStyle = (c + r) % 2 === 0 ? warp[c % warp.length] : weft[r % weft.length];
+      ctx.fillRect(c * thread, r * thread, thread, thread);
+    }
+  }
+}
+
+function renderDesign() {
+  const kg = renderSide("warp") + renderSide("weft");
+  $("order-total").textContent = qty(kg);
+  drawCheck();
+}
+
+["warp", "weft"].forEach((key) => {
+  const bands = DESIGN[key].bands;
+  const list = $(`${key}-order`);
+  bands.forEach(([name, t], i) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="chip" style="background:${INK[name]}"></span><span>${name}</span>`;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "400";
+    input.inputMode = "numeric";
+    input.value = t;
+    input.setAttribute("aria-label", `${key} stripe ${i + 1}, ${name}, thread count`);
+    input.addEventListener("input", () => {
+      bands[i][1] = Math.min(400, Math.max(0, parseInt(input.value, 10) || 0));
+      renderDesign();
+    });
+    li.appendChild(input);
+    list.appendChild(li);
+  });
+});
+orderLength.addEventListener("input", renderDesign);
 
 function drawAll() {
   heroBand();
   loomBand();
-  swatches();
+  drawCheck();
 }
 
 let timer;
@@ -203,4 +318,5 @@ window.addEventListener("resize", () => {
   clearTimeout(timer);
   timer = setTimeout(drawAll, 150);
 });
+renderDesign();
 drawAll();
